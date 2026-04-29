@@ -5,8 +5,8 @@ import csv
 from datetime import datetime
 import argparse
 
-# Staff identifier
-STAFF_NAME = "trikartainvitationsouvenir"
+# Default staff keyword (case-insensitive, partial match)
+DEFAULT_STAFF_KEYWORD = "trikarta"
 
 # Heuristic keywords
 DEAL_KEYWORDS = ["deal", "order", "siap", "oke", "transfer", "kirim alamat", "dp", "lunas", "fix", "setuju"]
@@ -23,7 +23,11 @@ def parse_timestamp(text):
             return None
     return None
 
-def analyze_whatsapp_data(input_path, output_path):
+def is_staff_sender(sender: str, keyword: str) -> bool:
+    """Return True if the sender string contains the keyword (case-insensitive)."""
+    return keyword.lower() in sender.lower()
+
+def analyze_whatsapp_data(input_path, output_path, staff_keyword=DEFAULT_STAFF_KEYWORD):
     if not os.path.exists(input_path):
         print(f"File not found: {input_path}")
         return
@@ -119,8 +123,8 @@ def analyze_whatsapp_data(input_path, output_path):
         if not msg_list:
             continue
             
-        total_client_msg = sum(1 for m in msg_list if STAFF_NAME not in m["sender"].lower())
-        total_staff_msg = sum(1 for m in msg_list if STAFF_NAME in m["sender"].lower())
+        total_client_msg = sum(1 for m in msg_list if not is_staff_sender(m["sender"], staff_keyword))
+        total_staff_msg  = sum(1 for m in msg_list if     is_staff_sender(m["sender"], staff_keyword))
         
         reply_speeds = [] # in minutes
         follow_ups = 0
@@ -129,28 +133,29 @@ def analyze_whatsapp_data(input_path, output_path):
         last_client_msg_time = None
         
         for i, m in enumerate(msg_list):
-            is_staff = STAFF_NAME in m["sender"].lower()
+            is_staff = is_staff_sender(m["sender"], staff_keyword)
             
             if not is_staff:
                 last_sender_was_client = True
                 last_client_msg_time = m["timestamp"]
             else:
                 if last_sender_was_client:
-                    # Staff replied to client
-                    delta = (m["timestamp"] - last_client_msg_time).total_seconds() / 60
-                    reply_speeds.append(max(0, delta))
+                    # Staff replied to client - delta in SECONDS
+                    delta_seconds = (m["timestamp"] - last_client_msg_time).total_seconds()
+                    reply_speeds.append(max(0, delta_seconds))
                     last_sender_was_client = False
                 
                 # Check for follow up
                 if i > 0:
                     prev_m = msg_list[i-1]
-                    if STAFF_NAME in prev_m["sender"].lower():
+                    if is_staff_sender(prev_m["sender"], staff_keyword):
                         delta = (m["timestamp"] - prev_m["timestamp"]).total_seconds() / 3600 # in hours
                         if delta > 12:
                             follow_ups += 1
                             
-        avg_reply_speed = sum(reply_speeds) / len(reply_speeds) if reply_speeds else 0
-        avg_reply_speed_hours = avg_reply_speed / 60
+        # reply_speeds is in seconds; convert to hours
+        avg_reply_speed_seconds = sum(reply_speeds) / len(reply_speeds) if reply_speeds else 0
+        avg_reply_speed_hours = avg_reply_speed_seconds / 3600
         
         # Determine status (Closing)
         full_text = " ".join([m["content"] for m in msg_list]).lower()
@@ -205,7 +210,7 @@ def analyze_whatsapp_data(input_path, output_path):
             "Closing": closing,
             "Produk": produk,
             "Keterangan": keterangan,
-            "Kecepatan Membalas (Jam)": round(avg_reply_speed_hours, 2)
+            "Kecepatan Membalas (Jam)": round(avg_reply_speed_hours, 4)
         })
         
     # Write to CSV
@@ -222,14 +227,17 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Parse WhatsApp chat data from DOCX files.")
     parser.add_argument("input", help="Path to the input .docx file")
     parser.add_argument("-o", "--output", help="Path to the output .csv file (optional)")
+    parser.add_argument("--staff", default=DEFAULT_STAFF_KEYWORD,
+                        help=f"Keyword to identify staff messages (default: '{DEFAULT_STAFF_KEYWORD}')")
     
     args = parser.parse_args()
     
-    input_file = args.input
+    input_file  = args.input
     output_file = args.output
+    staff_kw    = args.staff
     
     if not output_file:
         base = os.path.splitext(input_file)[0]
         output_file = f"{base}_Analysis.csv"
         
-    analyze_whatsapp_data(input_file, output_file)
+    analyze_whatsapp_data(input_file, output_file, staff_keyword=staff_kw)
