@@ -12,6 +12,9 @@ DEFAULT_STAFF_KEYWORD = "trikarta"
 DEAL_KEYWORDS = ["deal", "order", "siap", "oke", "transfer", "kirim alamat", "dp", "lunas", "fix", "setuju"]
 NOT_DEAL_KEYWORDS = ["batal", "maaf", "mahal", "nanti dulu", "tanya dulu", "pending", "cancel", "tidak jadi"]
 
+# Kata kunci tahap desain → otomatis Deal (klien sudah DP dan masuk produksi)
+DESIGN_DEAL_KEYWORDS = ["revisi", "konsep", "proof", "mockup", "acc konsep", "acc desain", "cek konsep", "cek desain"]
+
 def parse_timestamp(text):
     # Format: [18.18, 6/2/2026]
     match = re.search(r"\[(\d{1,2}\.\d{2}),\s+(\d{1,2}/\d{1,2}/\d{4})\]", text)
@@ -160,14 +163,25 @@ def analyze_whatsapp_data(input_path, output_path, staff_keyword=DEFAULT_STAFF_K
         # Determine status (Closing)
         full_text = " ".join([m["content"] for m in msg_list]).lower()
         closing = "Pending"
+
         if any(kw in full_text for kw in NOT_DEAL_KEYWORDS):
             closing = "Not Deal"
+
         if any(kw in full_text for kw in DEAL_KEYWORDS):
             last_text = " ".join([m["content"] for m in msg_list[-5:]]).lower()
             if any(kw in last_text for kw in DEAL_KEYWORDS):
                 closing = "Deal"
             elif any(kw in last_text for kw in NOT_DEAL_KEYWORDS):
                 closing = "Not Deal"
+
+        # Jika ada kata kunci desain → otomatis Deal (klien sudah masuk tahap produksi)
+        if any(kw in full_text for kw in DESIGN_DEAL_KEYWORDS):
+            closing = "Deal"
+
+        # Jika follow-up ke-3 dan pesan terakhir dari staf (klien tidak respons) → Not Deal
+        last_sender_is_staff = is_staff_sender(msg_list[-1]["sender"], staff_keyword)
+        if follow_ups >= 3 and last_sender_is_staff:
+            closing = "Not Deal"
 
         # Extract extra info
         first_msg = msg_list[0]
