@@ -11,6 +11,7 @@ ENV/
 *.csv
 *.xlsx
 *.docx
+*.txt
 
 # IDEs
 .vscode/
