@@ -1,6 +1,7 @@
 import pandas as pd
 import re
 import warnings
+import datetime
 
 # Suppress warnings for cleaner output
 warnings.filterwarnings("ignore")
@@ -41,6 +42,35 @@ def clean_marketing_name(name):
         name = name.replace(word, '')
     return name.strip().capitalize()
 
+def parse_date(val):
+    if pd.isna(val):
+        return pd.NaT
+    if isinstance(val, (pd.Timestamp, datetime.datetime)):
+        return val
+    
+    s = str(val).lower()
+    # Mapping bulan Indonesia ke Inggris
+    months = {
+        'januari': 'January', 'februari': 'February', 'maret': 'March',
+        'april': 'April', 'mei': 'May', 'juni': 'June',
+        'juli': 'July', 'agustus': 'August', 'september': 'September',
+        'oktober': 'October', 'november': 'November', 'desember': 'December',
+        'jan': 'Jan', 'feb': 'Feb', 'mar': 'Mar', 'apr': 'Apr', 'mei': 'May',
+        'jun': 'Jun', 'jul': 'Jul', 'ags': 'Aug', 'sep': 'Sep', 'okt': 'Oct',
+        'nov': 'Nov', 'des': 'Dec'
+    }
+    for indo, eng in months.items():
+        if indo in s:
+            s = s.replace(indo, eng)
+            break
+            
+    # Jika tidak ada tahun, tambahkan 2026
+    if not re.search(r'\d{4}', s):
+        # Coba deteksi format d-m atau d m
+        s = s + '-2026'
+        
+    return pd.to_datetime(s, errors='coerce')
+
 # Kolom yang digunakan:
 # CSV (MASTER): Marketing, Nomor Klien, Tanggal Chat, Status Custoimer, Status, Channel
 # EXCEL (DATA WA): Nama Sheet (sebagai Marketing), NO. HP, TGL
@@ -65,15 +95,20 @@ def main():
         (csv_df['Tanggal Chat'].dt.year == 2026) &
         (csv_df['Status Custoimer'] == 'New') &
         (csv_df['Status'] == 'Lead') &
-        (csv_df['Channel'].isin(['Instagram']))
+        (csv_df['Channel'].isin(['Instagram', 'Tiktok']))
     ]
     
     # 2. Load Excel
-    excel_file = 'data wa marketing (4).xlsx'
+    # Coba kedua kemungkinan nama file
+    excel_file = 'data wa marketing.xlsx'
+    import os
+    if not os.path.exists(excel_file):
+        excel_file = 'data wa marketing (4).xlsx'
+        
     try:
         xl = pd.ExcelFile(excel_file)
     except Exception as e:
-        print(f"Error membaca Excel: {e}")
+        print(f"Error membaca Excel ({excel_file}): {e}")
         return
 
     excel_data = []
@@ -82,11 +117,12 @@ def main():
         if 'TGL' not in df.columns or 'NO. HP' not in df.columns:
             continue
             
-        df['TGL'] = pd.to_datetime(df['TGL'], errors='coerce')
+        # Gunakan parser baru yang menangani bahasa Indonesia
+        df['TGL_parsed'] = df['TGL'].apply(parse_date)
         df['normalized_phone'] = df['NO. HP'].apply(normalize_phone)
         
         # Filter May 2026
-        df_may = df[(df['TGL'].dt.month == 5) & (df['TGL'].dt.year == 2026)].copy()
+        df_may = df[(df['TGL_parsed'].dt.month == 5) & (df['TGL_parsed'].dt.year == 2026)].copy()
         
         marketing = clean_marketing_name(sheet)
         df_may['clean_marketing'] = marketing
@@ -115,7 +151,7 @@ def main():
     all_marketings = sorted(list(set([x[0] for x in csv_set.union(excel_set)])))
     
     print("\n" + "="*50)
-    print("HASIL PERBANDINGAN DATA MARKETING - MEI 2026")
+    print(f"HASIL PERBANDINGAN DATA MARKETING - MEI 2026 (Filtrasi: New, Lead, IG/Tiktok)")
     print("="*50)
 
     for m in all_marketings:
@@ -146,7 +182,7 @@ def main():
             print("    (kosong)")
     
     print("\n" + "="*50)
-    print(f"TOTAL UNIK CSV: {len(csv_set)}")
+    print(f"TOTAL UNIK CSV (IG/Tiktok, New, Lead): {len(csv_set)}")
     print(f"TOTAL UNIK EXCEL: {len(excel_set)}")
     print(f"TOTAL SAMA: {len(both)}")
     print("="*50)
