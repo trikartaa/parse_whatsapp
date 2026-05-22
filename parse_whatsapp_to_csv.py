@@ -138,34 +138,42 @@ def parse_whatsapp_file(input_file: str) -> List[Dict]:
         if client_phone_clean.startswith("62"):
             client_phone_clean = "0" + client_phone_clean
         
-        # Split chat logs by "Follow up" marker
+        # Split chat logs by markers: "Follow up", "Deal", or "Not Deal"
         chat_sections = []
         current_section = []
+        current_status = ""  # Initial status for main section
         
         for line in lines[phone_line_idx + 1:]:
-            line_stripped = line.strip()
+            line_stripped = line.strip().lower()
             
-            # Check if this is "Follow up" marker
-            if line_stripped.lower() == "follow up":
+            # Check for markers
+            new_status = None
+            if line_stripped == "follow up":
+                new_status = "Follow Up"
+            elif line_stripped == "deal":
+                new_status = "Deal"
+            elif line_stripped == "not deal":
+                new_status = "Not Deal"
+                
+            if new_status:
                 # Save current section if not empty
                 if current_section:
-                    chat_sections.append(("main", current_section))
-                # Start follow-up section
+                    chat_sections.append((current_status, current_section))
+                # Start new section with new status
                 current_section = []
+                current_status = new_status
                 continue
             
             current_section.append(line)
         
         # Save last section
         if current_section:
-            # Determine if this is follow-up or main
-            section_type = "followup" if len(chat_sections) > 0 else "main"
-            chat_sections.append((section_type, current_section))
+            chat_sections.append((current_status, current_section))
         
         # Process each section as a separate record
         followup_counter = 0
         
-        for section_idx, (section_type, section_lines) in enumerate(chat_sections):
+        for section_idx, (section_status, section_lines) in enumerate(chat_sections):
             chat_logs = []
             first_datetime = None
             
@@ -179,17 +187,15 @@ def parse_whatsapp_file(input_file: str) -> List[Dict]:
                     chat_logs.append(line)
                     
                     # Extract datetime from first chat log
-                    # For main section: from CLIENT
-                    # For follow-up section: from FIRST chat (any sender)
                     if first_datetime is None:
-                        if section_type == "main":
-                            # Only from client chat
+                        if section_idx == 0:
+                            # Only from client chat for the first section
                             if is_client_chat_line(line, client_name, client_phone):
                                 tanggal, jam = extract_datetime_from_log(line)
                                 if tanggal and jam:
                                     first_datetime = (tanggal, jam)
                         else:
-                            # For follow-up: take first chat with timestamp
+                            # For subsequent sections: take first chat with timestamp
                             tanggal, jam = extract_datetime_from_log(line)
                             if tanggal and jam:
                                 first_datetime = (tanggal, jam)
@@ -199,22 +205,20 @@ def parse_whatsapp_file(input_file: str) -> List[Dict]:
                 continue
             
             # Determine tanggal and jam
-            if section_type == "main":
-                if first_datetime:
-                    tanggal_chat, jam_chat = first_datetime
-                else:
-                    tanggal_chat = ""
-                    jam_chat = ""
-                status = ""
+            if first_datetime:
+                tanggal_chat, jam_chat = first_datetime
+            else:
+                tanggal_chat = ""
+                jam_chat = ""
+            
+            # Assign status and follow-up counter
+            if section_idx == 0:
+                status = section_status
                 followup_ke = ""
             else:
-                # Follow-up section - ambil dari chat pertama di section tersebut
-                if first_datetime:
-                    tanggal_chat, jam_chat = first_datetime
-                else:
-                    tanggal_chat = ""
-                    jam_chat = ""
-                status = "Follow Up"
+                # If it's a subsequent section, it's a follow-up
+                # Default to "Follow Up" if for some reason section_status is empty
+                status = section_status if section_status else "Follow Up"
                 followup_counter += 1
                 followup_ke = f"F{followup_counter}"
             
@@ -279,7 +283,7 @@ def export_to_csv(records: List[Dict], output_file: str):
         writer.writeheader()
         writer.writerows(records)
     
-    print(f"✓ Exported {len(records)} records to {output_file}")
+    print(f"Exported {len(records)} records to {output_file}")
 
 
 def main(input_file: str = None, output_file: str = None):
@@ -296,7 +300,7 @@ def main(input_file: str = None, output_file: str = None):
     
     # Check if input file exists
     if not Path(input_file).exists():
-        print(f"❌ Input file not found: {input_file}")
+        print(f"Error: Input file not found: {input_file}")
         return
     
     # Auto-generate output filename if not provided
@@ -304,7 +308,7 @@ def main(input_file: str = None, output_file: str = None):
         input_path = Path(input_file)
         output_file = input_path.parent / f"{input_path.stem}-parsed.csv"
     
-    print(f"📖 Parsing: {input_file}")
+    print(f"Reading: {input_file}")
     
     # Parse file
     records = parse_whatsapp_file(input_file)
