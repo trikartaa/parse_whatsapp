@@ -117,6 +117,10 @@ def main():
         if 'TGL' not in df.columns or 'NO. HP' not in df.columns:
             continue
             
+        # Perbaikan: Lakukan forward-fill pada kolom TGL untuk menangani data yang kosong 
+        # (biasanya tanggal hanya ditulis sekali untuk beberapa baris di bawahnya)
+        df['TGL'] = df['TGL'].ffill()
+            
         # Gunakan parser baru yang menangani bahasa Indonesia
         df['TGL_parsed'] = df['TGL'].apply(parse_date)
         df['normalized_phone'] = df['NO. HP'].apply(normalize_phone)
