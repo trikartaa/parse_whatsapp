@@ -1,7 +1,9 @@
+import argparse
 import pandas as pd
 import re
 import warnings
 import datetime
+from pathlib import Path
 
 # Suppress warnings for cleaner output
 warnings.filterwarnings("ignore")
@@ -12,9 +14,11 @@ def normalize_phone(phone):
     
     # If it's a float (common in Excel), convert to int first to avoid .0
     if isinstance(phone, float):
-        s = str(int(phone))
+        s = "{:.0f}".format(phone)
     else:
-        s = str(phone)
+        s = str(phone).strip()
+        if s.endswith('.0'):
+            s = s[:-2]
         
     # Remove any non-digit characters
     s = re.sub(r'\D', '', s)
@@ -25,10 +29,7 @@ def normalize_phone(phone):
     # Normalize to 62 format
     if s.startswith('0'):
         s = '62' + s[1:]
-    elif s.startswith('62'):
-        pass # Already in 62 format
     elif s.startswith('8'):
-        # If it starts with 8 (typical for Indonesian mobile numbers without 0/62), prepend 62
         s = '62' + s
         
     return s
@@ -66,77 +67,141 @@ def parse_date(val):
             
     # Jika tidak ada tahun, tambahkan 2026
     if not re.search(r'\d{4}', s):
-        # Coba deteksi format d-m atau d m
         s = s + '-2026'
         
     return pd.to_datetime(s, errors='coerce')
 
-# Kolom yang digunakan:
-# CSV (MASTER): Marketing, Nomor Klien, Tanggal Chat, Status Custoimer, Status, Channel
-# EXCEL (DATA WA): Nama Sheet (sebagai Marketing), NO. HP, TGL
+def common_prefix_len(left, right):
+    total = 0
+    for left_digit, right_digit in zip(left, right):
+        if left_digit != right_digit:
+            break
+        total += 1
+    return total
+
+def levenshtein_distance(left, right):
+    if left == right:
+        return 0
+    previous = list(range(len(right) + 1))
+    for i, left_digit in enumerate(left, start=1):
+        current = [i]
+        for j, right_digit in enumerate(right, start=1):
+            cost = 0 if left_digit == right_digit else 1
+            current.append(min(
+                previous[j] + 1,
+                current[j - 1] + 1,
+                previous[j - 1] + cost,
+            ))
+        previous = current
+    return previous[-1]
+
+def first_difference_position(left, right):
+    for index, (left_digit, right_digit) in enumerate(zip(left, right), start=1):
+        if left_digit != right_digit:
+            return index
+    if len(left) != len(right):
+        return min(len(left), len(right)) + 1
+    return None
+
+def find_typo_candidates(csv_numbers, excel_numbers, min_prefix, max_distance):
+    candidates = []
+    for excel_phone in sorted(excel_numbers):
+        best_matches = []
+        for csv_phone in sorted(csv_numbers):
+            prefix_len = common_prefix_len(csv_phone, excel_phone)
+            if prefix_len < min_prefix:
+                continue
+            distance = levenshtein_distance(csv_phone, excel_phone)
+            if distance == 0 or distance > max_distance:
+                continue
+            best_matches.append({
+                "csv_phone": csv_phone,
+                "excel_phone": excel_phone,
+                "prefix_len": prefix_len,
+                "distance": distance,
+                "diff_position": first_difference_position(csv_phone, excel_phone),
+            })
+        if best_matches:
+            best_matches.sort(key=lambda item: (item["distance"], -item["prefix_len"], item["csv_phone"]))
+            candidates.append(best_matches[0])
+    return candidates
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Bandingkan data Master CSV dengan Data WA Marketing (Excel)."
+    )
+    parser.add_argument(
+        "csv_file",
+        help="Path file CSV Master, contoh: \"Dashboard KPI Whatsapp - MASTER_DATA.csv\"",
+    )
+    parser.add_argument(
+        "excel_file",
+        help="Path file Excel Data WA, contoh: \"data wa marketing.xlsx\"",
+    )
+    parser.add_argument(
+        "--typo-min-prefix",
+        type=int,
+        default=3,
+        help="Minimal jumlah digit awal yang harus sama untuk kandidat typo. Default: 3",
+    )
+    parser.add_argument(
+        "--typo-max-distance",
+        type=int,
+        default=2,
+        help="Maksimal beda digit/edit untuk kandidat typo. Default: 2",
+    )
+    return parser.parse_args()
 
 def main():
-    print("Membaca data...")
+    args = parse_args()
+    print("="*65)
+    print("   PERBANDINGAN DATA MARKETING - MEI 2026")
+    print("="*65)
     
     # 1. Load CSV
     try:
-        csv_df = pd.read_csv('Dashboard KPI Whatsapp - MASTER_DATA.csv')
+        csv_df = pd.read_csv(args.csv_file)
+        csv_df['Tanggal Chat'] = pd.to_datetime(csv_df['Tanggal Chat'], dayfirst=True, errors='coerce')
+        csv_df['normalized_phone'] = csv_df['Nomor Klien'].apply(normalize_phone)
+        csv_df['clean_marketing'] = csv_df['Marketing'].apply(clean_marketing_name)
+
+        # Filter May 2026 + Status Customer == New + Status == Lead + Channel in [Instagram, Tiktok]
+        csv_may = csv_df[
+            (csv_df['Tanggal Chat'].dt.month == 5) & 
+            (csv_df['Tanggal Chat'].dt.year == 2026) &
+            (csv_df['Status Custoimer'] == 'New') &
+            (csv_df['Status'] == 'Lead') &
+            (csv_df['Channel'].isin(['Instagram', 'Tiktok']))
+        ].copy()
     except Exception as e:
         print(f"Error membaca CSV: {e}")
         return
 
-    csv_df['Tanggal Chat'] = pd.to_datetime(csv_df['Tanggal Chat'], dayfirst=True, errors='coerce')
-    csv_df['normalized_phone'] = csv_df['Nomor Klien'].apply(normalize_phone)
-    csv_df['clean_marketing'] = csv_df['Marketing'].apply(clean_marketing_name)
-
-    # Filter May 2026 + Status Customer == New + Status == Lead + Channel in [Instagram, Tiktok]
-    csv_may = csv_df[
-        (csv_df['Tanggal Chat'].dt.month == 5) & 
-        (csv_df['Tanggal Chat'].dt.year == 2026) &
-        (csv_df['Status Custoimer'] == 'New') &
-        (csv_df['Status'] == 'Lead') &
-        (csv_df['Channel'].isin(['Instagram', 'Tiktok']))
-    ]
-    
     # 2. Load Excel
-    # Coba kedua kemungkinan nama file
-    excel_file = 'data wa marketing.xlsx'
-    import os
-    if not os.path.exists(excel_file):
-        excel_file = 'data wa marketing (4).xlsx'
-        
     try:
-        xl = pd.ExcelFile(excel_file)
+        xl = pd.ExcelFile(args.excel_file)
+        excel_data = []
+        for sheet in xl.sheet_names:
+            df = pd.read_excel(args.excel_file, sheet_name=sheet)
+            if 'TGL' not in df.columns or 'NO. HP' not in df.columns:
+                continue
+                
+            df['TGL'] = df['TGL'].ffill()
+            df['TGL_parsed'] = df['TGL'].apply(parse_date)
+            df['normalized_phone'] = df['NO. HP'].apply(normalize_phone)
+            
+            df_may = df[(df['TGL_parsed'].dt.month == 5) & (df['TGL_parsed'].dt.year == 2026)].copy()
+            marketing = clean_marketing_name(sheet)
+            df_may['clean_marketing'] = marketing
+            excel_data.append(df_may[['clean_marketing', 'normalized_phone']])
+
+        if not excel_data:
+            excel_may = pd.DataFrame(columns=['clean_marketing', 'normalized_phone'])
+        else:
+            excel_may = pd.concat(excel_data)
     except Exception as e:
-        print(f"Error membaca Excel ({excel_file}): {e}")
+        print(f"Error membaca Excel: {e}")
         return
-
-    excel_data = []
-    for sheet in xl.sheet_names:
-        df = pd.read_excel(excel_file, sheet_name=sheet)
-        if 'TGL' not in df.columns or 'NO. HP' not in df.columns:
-            continue
-            
-        # Perbaikan: Lakukan forward-fill pada kolom TGL untuk menangani data yang kosong 
-        # (biasanya tanggal hanya ditulis sekali untuk beberapa baris di bawahnya)
-        df['TGL'] = df['TGL'].ffill()
-            
-        # Gunakan parser baru yang menangani bahasa Indonesia
-        df['TGL_parsed'] = df['TGL'].apply(parse_date)
-        df['normalized_phone'] = df['NO. HP'].apply(normalize_phone)
-        
-        # Filter May 2026
-        df_may = df[(df['TGL_parsed'].dt.month == 5) & (df['TGL_parsed'].dt.year == 2026)].copy()
-        
-        marketing = clean_marketing_name(sheet)
-        df_may['clean_marketing'] = marketing
-        excel_data.append(df_may[['clean_marketing', 'normalized_phone']])
-
-    if not excel_data:
-        print("Tidak ada data valid di Excel untuk Mei 2026.")
-        excel_may = pd.DataFrame(columns=['clean_marketing', 'normalized_phone'])
-    else:
-        excel_may = pd.concat(excel_data)
 
     # 3. Compare sets of (Marketing, Phone)
     csv_set = set(zip(csv_may['clean_marketing'], csv_may['normalized_phone']))
@@ -151,13 +216,9 @@ def main():
     only_csv = csv_set - excel_set
     only_excel = excel_set - csv_set
 
-    # 4. Output
+    # 4. Output per Marketing
     all_marketings = sorted(list(set([x[0] for x in csv_set.union(excel_set)])))
     
-    print("\n" + "="*50)
-    print(f"HASIL PERBANDINGAN DATA MARKETING - MEI 2026 (Filtrasi: New, Lead, IG/Tiktok)")
-    print("="*50)
-
     for m in all_marketings:
         m_both = sorted([x[1] for x in both if x[0] == m])
         m_only_csv = sorted([x[1] for x in only_csv if x[0] == m])
@@ -167,29 +228,36 @@ def main():
             continue
 
         print(f"\n> MARKETING: {m}")
-        print(f"  [SAMA DI KEDUANYA] - {len(m_both)} nomor:")
-        if m_both:
-            for p in m_both: print(f"    - {p}")
-        else:
-            print("    (kosong)")
-
-        print(f"  [HANYA DI CSV (MASTER)] - {len(m_only_csv)} nomor:")
+        print(f"  [SAMA DI KEDUANYA] - {len(m_both)}")
+        print(f"  [HANYA DI CSV (MASTER)] - {len(m_only_csv)}")
         if m_only_csv:
             for p in m_only_csv: print(f"    - {p}")
-        else:
-            print("    (kosong)")
 
-        print(f"  [HANYA DI EXCEL (DATA WA)] - {len(m_only_excel)} nomor:")
+        print(f"  [HANYA DI EXCEL (DATA WA)] - {len(m_only_excel)}")
         if m_only_excel:
             for p in m_only_excel: print(f"    - {p}")
-        else:
-            print("    (kosong)")
+
+        # Typo detection per marketing
+        if m_only_csv and m_only_excel:
+            typos = find_typo_candidates(
+                m_only_csv, 
+                m_only_excel, 
+                args.typo_min_prefix, 
+                args.typo_max_distance
+            )
+            if typos:
+                print(f"  [~] KANDIDAT TYPO ({m}):")
+                for item in typos:
+                    print(
+                        f"    ? Excel: {item['excel_phone']} -> Master: {item['csv_phone']} "
+                        f"(beda {item['distance']} digit, mulai digit ke-{item['diff_position']})"
+                    )
     
-    print("\n" + "="*50)
+    print("\n" + "="*65)
     print(f"TOTAL UNIK CSV (IG/Tiktok, New, Lead): {len(csv_set)}")
     print(f"TOTAL UNIK EXCEL: {len(excel_set)}")
     print(f"TOTAL SAMA: {len(both)}")
-    print("="*50)
+    print("="*65)
 
 if __name__ == "__main__":
     main()
