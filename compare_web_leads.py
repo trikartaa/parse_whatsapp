@@ -112,10 +112,14 @@ def parse_args():
         help="Path file CSV data follow up, contoh: \"Data Follow Up Trikarta NGAGEL Surabaya - April 2026.csv\"",
     )
     parser.add_argument(
+        "--output",
+        help="Path file output .txt (opsional), contoh: \"hasil_web.txt\"",
+    )
+    parser.add_argument(
         "--typo-min-prefix",
         type=int,
         default=3,
-        help="Minimal jumlah digit awal yang harus sama untuk kandidat typo. Default: 5",
+        help="Minimal jumlah digit awal yang harus sama untuk kandidat typo. Default: 3",
     )
     parser.add_argument(
         "--typo-max-distance",
@@ -138,12 +142,49 @@ def find_column(df, possible_names, label):
     available_columns = ", ".join(df.columns)
     raise KeyError(f"Kolom {label} tidak ditemukan. Kolom tersedia: {available_columns}")
 
+def parse_date_flexible(val):
+    if pd.isna(val):
+        return pd.NaT
+    
+    s = str(val).strip().lower()
+    if not s:
+        return pd.NaT
+        
+    # Mapping bulan Indonesia ke Inggris
+    months = {
+        'januari': 'January', 'februari': 'February', 'maret': 'March',
+        'april': 'April', 'mei': 'May', 'juni': 'June',
+        'juli': 'July', 'agustus': 'August', 'september': 'September',
+        'oktober': 'October', 'november': 'November', 'desember': 'December',
+        'jan': 'Jan', 'feb': 'Feb', 'mar': 'Mar', 'apr': 'Apr', 'mei': 'May',
+        'jun': 'Jun', 'jul': 'Jul', 'ags': 'Aug', 'sep': 'Sep', 'okt': 'Oct',
+        'nov': 'Nov', 'des': 'Dec'
+    }
+    for indo, eng in months.items():
+        if indo in s:
+            s = s.replace(indo, eng)
+            break
+            
+    # Jika tidak ada tahun (seperti 5/5), tambahkan 2026
+    if not re.search(r'\d{4}', s):
+        if '/' in s:
+            s = s + '/2026'
+        else:
+            s = s + '-2026'
+            
+    return pd.to_datetime(s, dayfirst=True, errors='coerce')
+
 def main():
     args = parse_args()
+    output_lines = []
 
-    print("="*65)
-    print("   KHUSUS MEI 2026: WEB (NEW) VS DATA FOLLOW UP")
-    print("="*65)
+    def log(msg=""):
+        print(msg)
+        output_lines.append(msg)
+
+    log("="*65)
+    log("   KHUSUS MEI 2026: WEB (NEW) VS DATA FOLLOW UP")
+    log("="*65)
     
     # 1. Load CSV master web dari argumen terminal
     try:
@@ -153,15 +194,14 @@ def main():
             ["Status Customer", "Status Custoimer"],
             "Status Customer",
         )
-        # Paksa parsing tanggal
-        master_df['Tanggal Chat'] = pd.to_datetime(master_df['Tanggal Chat'], dayfirst=True, errors='coerce')
+        # Paksa parsing tanggal dengan logika fleksibel
+        master_df['Tanggal Chat'] = master_df['Tanggal Chat'].apply(parse_date_flexible)
         
         # FILTER KETAT MEI 2026
-        # Catatan: Channel bisa 'Web' atau 'Tidak Diketahui'
         mask_master = (
             (master_df['Tanggal Chat'].dt.month == 5) & 
             (master_df['Tanggal Chat'].dt.year == 2026) &
-            (master_df['Channel'].isin(['Web', 'Tidak Diketahui'])) &
+            (master_df['Channel'] == 'Web') &
             (master_df['Status'] == 'Lead') &
             (master_df[status_customer_col] == 'New')
         )
@@ -169,25 +209,26 @@ def main():
         qualified_leads['norm_phone'] = qualified_leads['Nomor Klien'].apply(normalize_phone)
         master_set = set(qualified_leads['norm_phone'].dropna())
     except Exception as e:
-        print(f"Error master: {e}")
+        log(f"Error master: {e}")
         return
 
     # 2. Load CSV data follow up dari argumen terminal
     try:
         fu_df = read_csv_or_raise(args.followup_file)
         date_col = fu_df.columns[0]
-        fu_df[date_col] = pd.to_datetime(fu_df[date_col], dayfirst=True, errors='coerce')
+        # Gunakan parsing fleksibel untuk menangani spasi dan format 5/5
+        fu_df['parsed_date'] = fu_df[date_col].apply(parse_date_flexible)
         
         # FILTER KETAT MEI 2026
         mask_fu = (
-            (fu_df[date_col].dt.month == 5) & 
-            (fu_df[date_col].dt.year == 2026)
+            (fu_df['parsed_date'].dt.month == 5) & 
+            (fu_df['parsed_date'].dt.year == 2026)
         )
         fu_may = fu_df[mask_fu].copy()
         fu_may['norm_phone'] = fu_may['NO HP'].apply(normalize_phone)
         fu_set = set(fu_may['norm_phone'].dropna())
     except Exception as e:
-        print(f"Error follow-up: {e}")
+        log(f"Error follow-up: {e}")
         return
 
     # 3. Analisis
@@ -202,34 +243,43 @@ def main():
     )
     
     # 4. Tampilan
-    print(f"Total Lead Web (New) Mei 2026  : {len(master_set)}")
-    print(f"Total Follow Up Mei 2026       : {len(fu_set)}")
-    print("-" * 65)
+    log(f"Total Lead Web (New) Mei 2026  : {len(master_set)}")
+    log(f"Total Follow Up Mei 2026       : {len(fu_set)}")
+    log("-" * 65)
     
     if matching:
-        print(f"\n[v] NOMOR YANG SAMA (MEI 2026): {len(matching)}")
+        log(f"\n[v] NOMOR YANG SAMA (MEI 2026): {len(matching)}")
         for phone in sorted(list(matching)):
-            print(f"- {phone}")
+            log(f"- {phone}")
 
     if only_web:
-        print(f"\n[!] HANYA DI WEB (BELUM FOLLOW UP - MEI 2026): {len(only_web)}")
+        log(f"\n[!] HANYA DI WEB (BELUM FOLLOW UP - MEI 2026): {len(only_web)}")
         for phone in sorted(list(only_web)):
-            print(f"- {phone}")
+            log(f"- {phone}")
 
     if only_fu:
-        print(f"\n[?] HANYA DI FOLLOW UP (MEI 2026): {len(only_fu)}")
+        log(f"\n[?] HANYA DI FOLLOW UP (MEI 2026): {len(only_fu)}")
         for phone in sorted(list(only_fu)):
-            print(f"- {phone}")
+            log(f"- {phone}")
 
     if typo_candidates:
-        print(f"\n[~] KANDIDAT NOMOR TYPO (FOLLOW UP VS WEB): {len(typo_candidates)}")
-        print(f"    Aturan: awalan sama minimal {args.typo_min_prefix} digit, beda maksimal {args.typo_max_distance} edit.")
+        log(f"\n[~] KANDIDAT NOMOR TYPO (FOLLOW UP VS WEB): {len(typo_candidates)}")
+        log(f"    Aturan: awalan sama minimal {args.typo_min_prefix} digit, beda maksimal {args.typo_max_distance} edit.")
         for item in typo_candidates:
-            print(
+            log(
                 f"- Follow Up: {item['followup_phone']}  |  Web: {item['web_phone']}  "
                 f"| beda edit: {item['distance']}  | prefix sama: {item['prefix_len']} digit  "
                 f"| beda mulai digit ke-{item['diff_position']}"
             )
+
+    # 5. Save to file
+    if args.output:
+        try:
+            with open(args.output, 'w', encoding='utf-8') as f:
+                f.write("\n".join(output_lines))
+            print(f"\n[OK] Hasil perbandingan telah disimpan ke: {args.output}")
+        except Exception as e:
+            print(f"Error menyimpan file: {e}")
 
 if __name__ == "__main__":
     main()
