@@ -108,8 +108,9 @@ def parse_args():
         help="Path file CSV master web, contoh: \"Web Ngagel - Vegy.csv\"",
     )
     parser.add_argument(
-        "followup_file",
-        help="Path file CSV data follow up, contoh: \"Data Follow Up Trikarta NGAGEL Surabaya - April 2026.csv\"",
+        "followup_files",
+        nargs="+",
+        help="Satu atau lebih path file CSV data follow up",
     )
     parser.add_argument(
         "--output",
@@ -133,12 +134,23 @@ def read_csv_or_raise(file_path):
     path = Path(file_path)
     if not path.exists():
         raise FileNotFoundError(f"File tidak ditemukan: {path}")
+    # Coba beberapa encoding umum
+    for enc in ['utf-8', 'latin1', 'cp1252']:
+        try:
+            return pd.read_csv(path, encoding=enc)
+        except UnicodeDecodeError:
+            continue
     return pd.read_csv(path)
 
 def find_column(df, possible_names, label):
+    # Bersihkan nama kolom dari df dulu
+    clean_cols = [str(c).strip() for c in df.columns]
     for name in possible_names:
-        if name in df.columns:
-            return name
+        if name in clean_cols:
+            # Kembalikan nama kolom asli yang cocok
+            idx = clean_cols.index(name)
+            return df.columns[idx]
+            
     available_columns = ", ".join(df.columns)
     raise KeyError(f"Kolom {label} tidak ditemukan. Kolom tersedia: {available_columns}")
 
@@ -186,18 +198,21 @@ def main():
     log("   KHUSUS MEI 2026: WEB (NEW) VS DATA FOLLOW UP")
     log("="*65)
     
-    # 1. Load CSV master web dari argumen terminal
+    # 1. Load CSV master web
     try:
         master_df = read_csv_or_raise(args.master_file)
+        # Bersihkan spasi di nama kolom master
+        master_df.columns = [str(c).strip() for c in master_df.columns]
+        
         status_customer_col = find_column(
             master_df,
             ["Status Customer", "Status Custoimer"],
             "Status Customer",
         )
-        # Paksa parsing tanggal dengan logika fleksibel
+        marketing_col_master = find_column(master_df, ["Marketing"], "Marketing")
+        
         master_df['Tanggal Chat'] = master_df['Tanggal Chat'].apply(parse_date_flexible)
         
-        # FILTER KETAT MEI 2026
         mask_master = (
             (master_df['Tanggal Chat'].dt.month == 5) & 
             (master_df['Tanggal Chat'].dt.year == 2026) &
@@ -207,70 +222,121 @@ def main():
         )
         qualified_leads = master_df[mask_master].copy()
         qualified_leads['norm_phone'] = qualified_leads['Nomor Klien'].apply(normalize_phone)
-        master_set = set(qualified_leads['norm_phone'].dropna())
+        qualified_leads['norm_mkt'] = qualified_leads[marketing_col_master].astype(str).str.strip().str.lower()
     except Exception as e:
         log(f"Error master: {e}")
         return
 
-    # 2. Load CSV data follow up dari argumen terminal
+    # 2. Load & Consolidate CSV data follow up
     try:
-        fu_df = read_csv_or_raise(args.followup_file)
-        date_col = fu_df.columns[0]
-        # Gunakan parsing fleksibel untuk menangani spasi dan format 5/5
-        fu_df['parsed_date'] = fu_df[date_col].apply(parse_date_flexible)
-        
-        # FILTER KETAT MEI 2026
-        mask_fu = (
-            (fu_df['parsed_date'].dt.month == 5) & 
-            (fu_df['parsed_date'].dt.year == 2026)
-        )
-        fu_may = fu_df[mask_fu].copy()
-        fu_may['norm_phone'] = fu_may['NO HP'].apply(normalize_phone)
-        fu_set = set(fu_may['norm_phone'].dropna())
+        # Mapping hardcoded berdasarkan nama file
+        file_to_mkt = {
+            "ngagel": "vegy",
+            "royal": "lia",
+            "malang": "adinda",
+            "pakuwon": "nadine"
+        }
+
+        all_fu_may_list = []
+        for fu_path in args.followup_files:
+            fname = Path(fu_path).name.lower()
+            
+            # Tentukan PIC berdasarkan nama file
+            assigned_mkt = None
+            for key, val in file_to_mkt.items():
+                if key in fname:
+                    assigned_mkt = val
+                    break
+            
+            if not assigned_mkt:
+                log(f"[!] Lewati {fu_path}: Tidak dikenali sebagai Malang/Ngagel/Pakuwon/Royal")
+                continue
+
+            log(f"Membaca file follow-up: {fu_path} -> PIC: {assigned_mkt.upper()}")
+            df_fu_raw = read_csv_or_raise(fu_path)
+            df_fu_raw.columns = [str(c).strip() for c in df_fu_raw.columns]
+            
+            date_col = df_fu_raw.columns[0]
+            phone_col_fu = find_column(df_fu_raw, ["NO HP"], "NO HP")
+            
+            df_fu_raw['parsed_date'] = df_fu_raw[date_col].apply(parse_date_flexible)
+            
+            mask_fu = (
+                (df_fu_raw['parsed_date'].dt.month == 5) & 
+                (df_fu_raw['parsed_date'].dt.year == 2026)
+            )
+            fu_may_part = df_fu_raw[mask_fu].copy()
+            fu_may_part['norm_phone'] = fu_may_part[phone_col_fu].apply(normalize_phone)
+            # HARDCODED: Semua baris di file ini dianggap milik PIC yang ditentukan
+            fu_may_part['norm_mkt'] = assigned_mkt
+            
+            all_fu_may_list.append(fu_may_part)
+            
+        if not all_fu_may_list:
+            log("Tidak ada data follow-up yang dimuat.")
+            return
+            
+        fu_may = pd.concat(all_fu_may_list, ignore_index=True)
     except Exception as e:
         log(f"Error follow-up: {e}")
         return
 
-    # 3. Analisis
-    matching = master_set.intersection(fu_set)
-    only_web = master_set - fu_set
-    only_fu = fu_set - master_set
-    typo_candidates = find_typo_candidates(
-        only_web,
-        only_fu,
-        args.typo_min_prefix,
-        args.typo_max_distance,
-    )
+
+    # 3. List Marketing (GABUNGAN)
+    all_marketing = sorted(list(set(qualified_leads['norm_mkt'].unique()) | set(fu_may['norm_mkt'].unique())))
     
-    # 4. Tampilan
-    log(f"Total Lead Web (New) Mei 2026  : {len(master_set)}")
-    log(f"Total Follow Up Mei 2026       : {len(fu_set)}")
+    log(f"\nTotal Lead Web (New) Mei 2026  : {len(qualified_leads['norm_phone'].dropna().unique())}")
+    log(f"Total Follow Up Mei 2026       : {len(fu_may['norm_phone'].dropna().unique())}")
     log("-" * 65)
-    
-    if matching:
-        log(f"\n[v] NOMOR YANG SAMA (MEI 2026): {len(matching)}")
-        for phone in sorted(list(matching)):
-            log(f"- {phone}")
 
-    if only_web:
-        log(f"\n[!] HANYA DI WEB (BELUM FOLLOW UP - MEI 2026): {len(only_web)}")
-        for phone in sorted(list(only_web)):
-            log(f"- {phone}")
+    for mkt in all_marketing:
+        if mkt == 'nan' or not mkt or mkt == 'none':
+            continue
+            
+        log("\n" + "#"*65)
+        log(f" MARKETING: {mkt.upper()}")
+        log("#"*65)
+        
+        mkt_leads = qualified_leads[qualified_leads['norm_mkt'] == mkt]
+        mkt_fu = fu_may[fu_may['norm_mkt'] == mkt]
+        
+        master_set = set(mkt_leads['norm_phone'].dropna().unique())
+        fu_set = set(mkt_fu['norm_phone'].dropna().unique())
 
-    if only_fu:
-        log(f"\n[?] HANYA DI FOLLOW UP (MEI 2026): {len(only_fu)}")
-        for phone in sorted(list(only_fu)):
-            log(f"- {phone}")
+        matching = master_set.intersection(fu_set)
+        only_web = master_set - fu_set
+        only_fu = fu_set - master_set
+        typo_candidates = find_typo_candidates(
+            only_web,
+            only_fu,
+            args.typo_min_prefix,
+            args.typo_max_distance,
+        )
+        
+        log(f"Lead Web (New) ditugaskan : {len(master_set)}")
+        log(f"Berhasil di-Follow Up    : {len(fu_set)}")
+        log("-" * 30)
+        
+        if matching:
+            log(f"[v] NOMOR YANG SUDAH MATCH: {len(matching)}")
 
-    if typo_candidates:
-        log(f"\n[~] KANDIDAT NOMOR TYPO (FOLLOW UP VS WEB): {len(typo_candidates)}")
-        log(f"    Aturan: awalan sama minimal {args.typo_min_prefix} digit, beda maksimal {args.typo_max_distance} edit.")
-        for item in typo_candidates:
-            log(
-                f"- Follow Up: {item['followup_phone']}  |  Web: {item['web_phone']}  "
-                f"| beda edit: {item['distance']}  | prefix sama: {item['prefix_len']} digit  "
-                f"| beda mulai digit ke-{item['diff_position']}"
-            )
+        if only_web:
+            log(f"[!] HANYA DI WEB (BELUM FOLLOW UP): {len(only_web)}")
+            for phone in sorted(list(only_web)):
+                log(f"    - {phone}")
+
+        if only_fu:
+            log(f"[?] HANYA DI FOLLOW UP (TIDAK ADA DI MASTER MEI): {len(only_fu)}")
+            for phone in sorted(list(only_fu)):
+                log(f"    - {phone}")
+
+        if typo_candidates:
+            log(f"[~] KANDIDAT NOMOR TYPO:")
+            for item in typo_candidates:
+                log(
+                    f"    - FU: {item['followup_phone']} | Web: {item['web_phone']} "
+                    f"(beda: {item['distance']}, prefix: {item['prefix_len']})"
+                )
 
     # 5. Save to file
     if args.output:

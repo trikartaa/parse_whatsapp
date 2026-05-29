@@ -3,10 +3,24 @@ import pandas as pd
 import re
 import warnings
 import datetime
+import sys
 from pathlib import Path
 
 # Suppress warnings for cleaner output
 warnings.filterwarnings("ignore")
+
+class Logger(object):
+    def __init__(self, filename):
+        self.terminal = sys.stdout
+        self.log = open(filename, "w", encoding="utf-8")
+
+    def write(self, message):
+        self.terminal.write(message)
+        self.log.write(message)
+
+    def flush(self):
+        self.terminal.flush()
+        self.log.flush()
 
 def normalize_phone(phone):
     if pd.isna(phone):
@@ -141,7 +155,7 @@ def parse_args():
     parser.add_argument(
         "--typo-min-prefix",
         type=int,
-        default=3,
+        default=2,
         help="Minimal jumlah digit awal yang harus sama untuk kandidat typo. Default: 3",
     )
     parser.add_argument(
@@ -150,10 +164,19 @@ def parse_args():
         default=2,
         help="Maksimal beda digit/edit untuk kandidat typo. Default: 2",
     )
+    parser.add_argument(
+        "-o", "--output",
+        help="Path file output .txt untuk menyimpan hasil.",
+    )
     return parser.parse_args()
 
 def main():
     args = parse_args()
+    
+    # Redirect output to file if requested
+    if args.output:
+        sys.stdout = Logger(args.output)
+        
     print("="*65)
     print("   PERBANDINGAN DATA MARKETING - MEI 2026")
     print("="*65)
@@ -171,7 +194,7 @@ def main():
             (csv_df['Tanggal Chat'].dt.year == 2026) &
             (csv_df['Status Custoimer'] == 'New') &
             (csv_df['Status'] == 'Lead') &
-            (csv_df['Channel'].isin(['Instagram', 'Tiktok']))
+            (csv_df['Channel'].isin(['Instagram']))
         ].copy()
     except Exception as e:
         print(f"Error membaca CSV: {e}")
